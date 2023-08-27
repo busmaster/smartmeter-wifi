@@ -1,6 +1,7 @@
 #include <WiFi.h>
 #include <AsyncTCP.h>
 #include <ESPAsyncWebServer.h>
+#include <AsyncElegantOTA.h>
 #include <SPIFFS.h>
 
 #include "esp_system.h"
@@ -17,17 +18,17 @@
 #include "aes.h"
 
 AsyncWebServer server(80);
-// Search for parameter in HTTP POST request
-const char* PARAM_INPUT_1 = "ssid";
-const char* PARAM_INPUT_2 = "pass";
 
 //Variables to save values from HTML form
 String ssid;
 String pass;
+String aeskey;
+String smartmeter_html;
 
 // File paths to save input values permanently
 const char* ssidPath = "/ssid.txt";
 const char* passPath = "/pass.txt";
+const char* aeskeyPath = "/aeskey.txt";
 
 unsigned long previousMillis = 0;
 const long interval = 10000;  // interval to wait for Wi-Fi connection (milliseconds)
@@ -102,7 +103,8 @@ static void Comm_init(ftd232_dev_hdl_t ftd232_dev) {
 
 #define AES_KEY_LEN                         16
 #define AES_IV_LEN                          16
-static unsigned char key[AES_KEY_LEN] = { 0xbb, 0x35, 0x59, 0x8d, 0x97, 0xc6, 0xa3, 0x1a, 0x29, 0x2b, 0x5c, 0xe8, 0xee, 0xda, 0xe5, 0x7a };
+
+static unsigned char key[AES_KEY_LEN];
 /* lower half of iv is the secondary address - it's the same for all EAG meters */
 static unsigned char iv[AES_IV_LEN]  = { 0x2d, 0x4c, 0x00, 0x00, 0x00, 0x00, 0x01, 0x0e, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
 
@@ -266,7 +268,8 @@ String readFile(fs::FS &fs, const char * path) {
   
     String fileContent;
     while (file.available()) {
-        fileContent = file.readStringUntil('\n');
+        fileContent = file.readString();
+//        fileContent = file.readStringUntil('\n');
         break;     
     }
     file.close();
@@ -275,7 +278,7 @@ String readFile(fs::FS &fs, const char * path) {
 }
 
 // Write file to SPIFFS
-void writeFile(fs::FS &fs, const char * path, const char * message) {
+void writeFile(fs::FS &fs, const char *path, const char *message) {
 
     Serial.printf("Writing file: %s\r\n", path);
 
@@ -322,18 +325,17 @@ bool initWiFi() {
   return true;
 }
 
-// Replaces placeholder with LED state value
-String processor(const String& var) {
-  if(var == "STATE") {
-    if(digitalRead(ledPin)) {
-      ledState = "ON";
+static void Set_key(String aeskey) {
+
+    char str[48];
+    int i = 0;
+    snprintf(str, sizeof(str), "%s", aeskey.c_str());
+    char *tok = strtok(str, " ");
+    while ((i < sizeof(key)) && (tok != 0)) {
+        key[i] = (uint8_t)strtoul(tok, 0, 16);
+        i++;
+        tok = strtok(0, " ");
     }
-    else {
-      ledState = "OFF";
-    }
-    return ledState;
-  }
-  return String();
 }
 
 void setup() {
@@ -348,27 +350,47 @@ void setup() {
     // Load values saved in SPIFFS
     ssid = readFile(SPIFFS, ssidPath);
     pass = readFile(SPIFFS, passPath);
+    aeskey = readFile(SPIFFS, aeskeyPath);
+
     Serial.println(ssid);
     Serial.println(pass);
+    Serial.println(aeskey);
+    Set_key(aeskey);
 
     if(initWiFi()) {
         // Route for root / web page
         server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
-            request->send(SPIFFS, "/index.html", "text/html", false, processor);
+            request->send(SPIFFS, "/index.html", "text/html");
         });
         server.serveStatic("/", SPIFFS, "/");
     
-        // Route to set GPIO state to HIGH
-        server.on("/on", HTTP_GET, [](AsyncWebServerRequest *request) {
-            digitalWrite(ledPin, HIGH);
-            request->send(SPIFFS, "/index.html", "text/html", false, processor);
+        smartmeter_html = readFile(SPIFFS, "/smartmeter.html");
+        if (!aeskey.isEmpty()) {
+            smartmeter_html.replace("00 11 22 33 44 55 66 77 88 99 aa bb cc dd ee ff", aeskey);
+        }
+        server.on("/aeskey", HTTP_GET, [](AsyncWebServerRequest *request) {
+            request->send(200, "text/html", smartmeter_html);
+        });
+        server.on("/aeskey", HTTP_POST, [](AsyncWebServerRequest *request) {
+            AsyncWebParameter* p = request->getParam(0);
+            if(p->isPost()) {
+                Serial.printf("POST[%s]: %s\n", p->name().c_str(), p->value().c_str());
+
+                // HTTP POST aes-key value
+                if (p->name() == "aes-key") {
+                    aeskey = p->value().c_str();
+                    Serial.print("AES-Key set to: ");
+                    Serial.println(aeskey);
+                    // Write file to save value
+                    writeFile(SPIFFS, aeskeyPath, aeskey.c_str());
+                }
+            }
+            request->send(200, "text/plain", "Done. ESP will restart...");
+            delay(3000);
+            ESP.restart();
         });
 
-        // Route to set GPIO state to LOW
-        server.on("/off", HTTP_GET, [](AsyncWebServerRequest *request) {
-            digitalWrite(ledPin, LOW);
-            request->send(SPIFFS, "/index.html", "text/html", false, processor);
-        });
+        AsyncElegantOTA.begin(&server);
         server.begin();
     } else {
         // Connect to Wi-Fi network with SSID and password
@@ -381,10 +403,10 @@ void setup() {
         Serial.println(IP); 
 
         // Web Server Root URL
-        server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){
+        server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
             request->send(SPIFFS, "/wifimanager.html", "text/html");
         });
-    
+
         server.serveStatic("/", SPIFFS, "/");
     
         server.on("/", HTTP_POST, [](AsyncWebServerRequest *request) {
@@ -393,7 +415,7 @@ void setup() {
                 AsyncWebParameter* p = request->getParam(i);
                 if(p->isPost()) {
                     // HTTP POST ssid value
-                    if (p->name() == PARAM_INPUT_1) {
+                    if (p->name() == "ssid") {
                         ssid = p->value().c_str();
                         Serial.print("SSID set to: ");
                         Serial.println(ssid);
@@ -401,7 +423,7 @@ void setup() {
                         writeFile(SPIFFS, ssidPath, ssid.c_str());
                     }
                     // HTTP POST pass value
-                    if (p->name() == PARAM_INPUT_2) {
+                    if (p->name() == "pass") {
                         pass = p->value().c_str();
                         Serial.print("Password set to: ");
                         Serial.println(pass);
@@ -411,7 +433,7 @@ void setup() {
 //                    Serial.printf("POST[%s]: %s\n", p->name().c_str(), p->value().c_str());
                 }
             }
-            request->send(200, "text/plain", "Done. ESP will restart, connect to your router.");
+            request->send(200, "text/plain", "Done. ESP will restart...");
             delay(3000);
             ESP.restart();
         });

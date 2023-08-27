@@ -622,9 +622,15 @@ esp_err_t ftd232_host_open(uint16_t vid, uint16_t pid, const ftd232_host_device_
     // Find underlying USB device
     ftd232_dev_t *ftd232_dev;
 
-    ESP_GOTO_ON_ERROR(
-        ftd232_find_and_open_usb_device(vid, pid, dev_config->connection_timeout_ms, &ftd232_dev),
-        exit, TAG, "USB device with VID: 0x%04X, PID: 0x%04X not found", vid, pid);
+
+    ret = ftd232_find_and_open_usb_device(vid, pid, dev_config->connection_timeout_ms, &ftd232_dev);
+    if (ret != ESP_OK) {
+        return ret;
+    }
+
+//    ESP_GOTO_ON_ERROR(
+//        ftd232_find_and_open_usb_device(vid, pid, dev_config->connection_timeout_ms, &ftd232_dev),
+//        exit, TAG, "USB device with VID: 0x%04X, PID: 0x%04X not found", vid, pid);
 
     // Find and save relevant interface and endpoint descriptors
     ESP_GOTO_ON_ERROR(
