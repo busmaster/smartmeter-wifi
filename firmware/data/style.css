@@ -95,18 +95,6 @@ button {
   border-radius: 4px;
   transition-duration: 0.4s;
 }
-.button-on {
-  background-color: #034078;
-}
-.button-on:hover {
-  background-color: #1282A2;
-}
-.button-off {
-  background-color: #858585;
-}
-.button-off:hover {
-  background-color: #252524;
-}
 .button-update {
   background-color: #034078;
 }
@@ -117,6 +105,18 @@ button {
   background-color: #034078;
 }
 .button-aeskey:hover {
+  background-color: #1282A2;
+}
+.button-mqtt {
+  background-color: #034078;
+}
+.button-mqtt:hover {
+  background-color: #1282A2;
+}
+.button-wlan {
+  background-color: #034078;
+}
+.button-wlan:hover {
   background-color: #1282A2;
 }
 

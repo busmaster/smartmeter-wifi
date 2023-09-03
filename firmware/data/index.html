@@ -1,27 +1,117 @@
-<!DOCTYPE html>
-<html>
-  <head>
-    <title>Smart Meter Wifi</title>
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <link rel="stylesheet" type="text/css" href="style.css">
-    <link rel="icon" type="image/png" href="favicon.png">
-  </head>
-  <body>
-    <div class="topnav">
-      <h1>Smart Meter Wifi</h1>
-    </div>
-    <div class="content">
-      <div class="card-grid">
-        <div class="card">
-          <p class="card-title"> Settings</p>
-          <p>
-            <a href="aeskey"><button class="button-aeskey">Set AES-Key</button></a>
-            <br>
-            <br>
-            <a href="update"><button class="button-update">Update</button></a>
-          </p>
-        </div>
+<!DOCTYPE HTML><html>
+<head>
+  <title>Smart Meter Wifi</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="stylesheet" type="text/css" href="style.css">
+  <link rel="icon" type="image/png" href="favicon.png">
+</head>
+<body>
+  <div class="topnav">
+    <h1>Smart Meter Wifi</h1>
+  </div>
+  <div class="content">
+    <div class="card-grid">
+      <div class="card">
+        <p class="card-title">Meter Data</p>
+        <p>
+          <table>
+            <tr>
+              <td>P+</td>
+              <td>
+                <span id="pplus">%PPLUS%</span>
+                <span>W</span>
+              </td>
+            </tr>
+            <tr>
+              <td>P-</td>
+              <td>
+                <span id="pminus">%PMINUS%</span>
+                <span>W</span>
+              </td>
+            </tr>
+            <tr>
+              <td>Q+</td>
+              <td>
+                <span id="qplus">%QPLUS%</span>
+                <span>var</span>
+              </td>
+            </tr>
+            <tr>
+              <td>Q-</td>
+              <td>
+                <span id="qminus">%QMINUS%</span>
+                <span>var</span>
+              </td>
+            </tr>
+            <tr>
+              <td>A+</td>
+              <td>
+                <span id="aplus">%APLUS%</span>
+                <span>Wh</span>
+              </td>
+            </tr>
+            <tr>
+              <td>A-</td>
+              <td>
+                <span id="aminus">%AMINUS%</span>
+                <span>Wh</span>
+              </td>
+            </tr>
+            <tr>
+              <td>R+</td>
+              <td>
+                <span id="rplus">%RPLUS%</span>
+                <span>varh</span>
+              </td>
+            </tr>
+            <tr>
+              <td>R-</td>
+              <td>
+                <span id="rminus">%RMINUS%</span>
+                <span>varh</span>
+              </td>
+            </tr>
+          </table>
+        </p>
+      </div>
+      <div class="card">
+        <p class="card-title">Settings</p>
+        <p>
+          <a href="wlan"><button class="button-wlan">WLAN</button></a>
+          <br>
+          <br>
+          <a href="aeskey"><button class="button-aeskey">AES-Key</button></a>
+          <br>
+          <br>
+          <a href="mqtt"><button class="button-mqtt">Mqtt</button></a>
+          <br>
+          <br>
+          <a href="update"><button class="button-update">Update</button></a>
+        </p>
       </div>
     </div>
-  </body>
+  </div>
+</body>
+<script>
+  setInterval(function ( ) {
+    var xhttp = new XMLHttpRequest();
+    xhttp.onreadystatechange = function() {
+      if (this.readyState == 4 && this.status == 200) {
+        document.getElementById("pplus").innerHTML = this.responseText;
+      }
+    };
+    xhttp.open("GET", "/pplus", true);
+    xhttp.send();
+  }, 1000 ) ;
+  setInterval(function ( ) {
+    var xhttp = new XMLHttpRequest();
+    xhttp.onreadystatechange = function() {
+      if (this.readyState == 4 && this.status == 200) {
+        document.getElementById("pminus").innerHTML = this.responseText;
+      }
+    };
+    xhttp.open("GET", "/pminus", true);
+    xhttp.send();
+  }, 1000 ) ;
+</script>
 </html>
