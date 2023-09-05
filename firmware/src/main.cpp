@@ -20,6 +20,8 @@
 #include "aes.h"
 
 AsyncWebServer server(80);
+AsyncWebSocket ws("/ws");
+
 
 //Variables to save values from HTML form
 String aeskey;
@@ -52,6 +54,7 @@ const int ledPin = 37;
 // Stores LED state
 String ledState;
 
+void notifyClients(const char *name, uint32_t val);
 
 #define USB_HOST_PRIORITY   20
 #define USB_DEVICE_VID      0x0403
@@ -196,6 +199,16 @@ static bool handle_rx(const uint8_t *data, size_t data_len, void *arg)
 
             if (mqttClient.connected()) {
                 mqttClient.publish(mqtttopic.c_str(), 1, false, message);
+            }
+            if (ws.availableForWriteAll()) {
+                notifyClients("pplus",  pplus);
+                notifyClients("pminus", pminus);
+                notifyClients("aplus",  aplus);
+                notifyClients("aminus", aminus);
+                notifyClients("qplus",  qplus);
+                notifyClients("qminus", qminus);
+                notifyClients("rplus",  rplus);
+                notifyClients("rminus", rminus);
             }
         } else {
             in_sync = false;
@@ -400,6 +413,34 @@ void onMqttDisconnect(espMqttClientTypes::DisconnectReason reason) {
   }
 }
 
+void notifyClients(const char *name, uint32_t val) {
+    char json[50];
+    snprintf(json, sizeof(json), "{\"name\":\"%s\", \"value\":\"%d\"}", name, val);
+    ws.textAll(json);
+}
+
+void onEvent(AsyncWebSocket *server, AsyncWebSocketClient *client, AwsEventType type,
+             void *arg, uint8_t *data, size_t len) {
+    switch (type) {
+    case WS_EVT_CONNECT:
+        Serial.printf("WebSocket client #%u connected from %s\n", client->id(), client->remoteIP().toString().c_str());
+        break;
+    case WS_EVT_DISCONNECT:
+        Serial.printf("WebSocket client #%u disconnected\n", client->id());
+        break;
+    case WS_EVT_DATA:
+    case WS_EVT_PONG:
+    case WS_EVT_ERROR:
+        Serial.printf("WebSocket WS_EVT_DATA WS_EVT_ERROR WS_EVT_PONG\r\n");
+        break;
+   }
+}
+
+void initWebSocket() {
+  ws.onEvent(onEvent);
+  server.addHandler(&ws);
+}
+
 String processor(const String& var){
 //  Serial.println(var);
   if (var == "PPLUS"){
@@ -451,9 +492,10 @@ void setup() {
     Set_key(aeskey);
 
     if(initWiFi()) {
-// https://github.com/bertmelis/espMqttClient/blob/main/examples/simple-esp32/simple-esp32.ino
 
-// https://randomnerdtutorials.com/esp32-dht11-dht22-temperature-humidity-web-server-arduino-ide/
+        initWebSocket();
+// https://github.com/bertmelis/espMqttClient/blob/main/examples/simple-esp32/simple-esp32.ino
+// https://randomnerdtutorials.com/esp32-websocket-server-arduino/
 
         if (mqttbroker && mqttport && mqtttopic) {
             mqttClient.onConnect(onMqttConnect);
@@ -468,32 +510,6 @@ void setup() {
         });
 
         server.serveStatic("/", SPIFFS, "/");
-
-        server.on("/pplus", HTTP_GET, [](AsyncWebServerRequest *request){
-            request->send(200, "text/plain", String(pplus));
-        });
-        server.on("/pminus", HTTP_GET, [](AsyncWebServerRequest *request){
-            request->send(200, "text/plain", String(pminus));
-        });
-        server.on("/qplus", HTTP_GET, [](AsyncWebServerRequest *request){
-            request->send(200, "text/plain", String(qplus));
-        });
-        server.on("/qminus", HTTP_GET, [](AsyncWebServerRequest *request){
-            request->send(200, "text/plain", String(qminus));
-        });
-        server.on("/aplus", HTTP_GET, [](AsyncWebServerRequest *request){
-            request->send(200, "text/plain", String(aplus));
-        });
-        server.on("/aminus", HTTP_GET, [](AsyncWebServerRequest *request){
-            request->send(200, "text/plain", String(aminus));
-        });
-        server.on("/rplus", HTTP_GET, [](AsyncWebServerRequest *request){
-            request->send(200, "text/plain", String(rplus));
-        });
-        server.on("/rminus", HTTP_GET, [](AsyncWebServerRequest *request){
-            request->send(200, "text/plain", String(rminus));
-        });
-
 
         smartmeter_html = readFile(SPIFFS, "/smartmeter.html");
         if (!aeskey.isEmpty()) {
@@ -660,4 +676,6 @@ void loop() {
     if (reconnectMqtt && currentMillis - lastReconnect > 5000) {
         connectToMqtt();
     }
+
+    ws.cleanupClients();
 }

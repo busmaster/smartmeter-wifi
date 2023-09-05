@@ -119,4 +119,25 @@ button {
 .button-wlan:hover {
   background-color: #1282A2;
 }
-
+table {
+  font-size: 1.6rem; 
+  margin: 0 auto;
+  background-color: #034078;
+  color: white;
+}
+table td:first-child {
+  margin: 1rem;
+  min-width: 4rem;
+  text-align: left;
+  padding-left: 10px;
+}
+table td:nth-child(2) {
+  min-width: 7rem;
+  text-align: right;
+}
+table td:nth-child(3) {
+  min-width: 3rem;
+  text-align: left;
+  padding-left: 10px;
+  padding-right: 10px;
+}
