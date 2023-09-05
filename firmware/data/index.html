@@ -1,0 +1,121 @@
+<!DOCTYPE HTML><html>
+<head>
+  <title>Smart Meter Wifi</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="stylesheet" type="text/css" href="style.css">
+  <link rel="icon" type="image/png" href="favicon.png">
+</head>
+<body>
+  <div class="topnav">
+    <h1>Smart Meter Wifi</h1>
+  </div>
+  <div class="content">
+    <div class="card-grid">
+      <div class="card">
+        <p class="card-title">Meter Data</p>
+        <p>
+          <table>
+            <tr>
+              <td>P+</td>
+              <td>
+                <span id="pplus">%PPLUS%</span>
+              </td>
+              <td>W</td>
+            </tr>
+            <tr>
+              <td>P&#x2212;</td>
+              <td>
+                <span id="pminus">%PMINUS%</span>
+              </td>
+              <td>W</td>
+            </tr>
+            <tr>
+              <td>Q+</td>
+              <td>
+                <span id="qplus">%QPLUS%</span>
+              </td>
+              <td>var</td>
+            </tr>
+            <tr>
+              <td>Q&#x2212;</td>
+              <td>
+                <span id="qminus">%QMINUS%</span>
+              </td>
+              <td>var</td>
+            </tr>
+            <tr>
+              <td>A+</td>
+              <td>
+                <span id="aplus">%APLUS%</span>
+              </td>
+              <td>Wh</td>
+            </tr>
+            <tr>
+              <td>A&#x2212;</td>
+              <td>
+                <span id="aminus">%AMINUS%</span>
+              </td>
+              <td>Wh</td>
+            </tr>
+            <tr>
+              <td>R+</td>
+              <td>
+                <span id="rplus">%RPLUS%</span>
+              </td>
+              <td>varh</td>
+            </tr>
+            <tr>
+              <td>R&#x2212;</td>
+              <td>
+                <span id="rminus">%RMINUS%</span>
+              </td>
+              <td>varh</td>
+            </tr>
+          </table>
+        </p>
+      </div>
+      <div class="card">
+        <p class="card-title">Settings</p>
+        <p>
+          <a href="wlan"><button class="button-wlan">WLAN</button></a>
+          <br>
+          <br>
+          <a href="aeskey"><button class="button-aeskey">AES-Key</button></a>
+          <br>
+          <br>
+          <a href="mqtt"><button class="button-mqtt">Mqtt</button></a>
+          <br>
+          <br>
+          <a href="update"><button class="button-update">Update</button></a>
+        </p>
+      </div>
+    </div>
+  </div>
+<script>
+  var gateway = `ws://${window.location.hostname}/ws`;
+  var websocket;
+  window.addEventListener('load', onLoad);
+  function initWebSocket() {
+    console.log('Trying to open a WebSocket connection...');
+    websocket = new WebSocket(gateway);
+    websocket.onopen    = onOpen;
+    websocket.onclose   = onClose;
+    websocket.onmessage = onMessage;
+  }
+  function onOpen(event) {
+    console.log('Connection opened');
+  }
+  function onClose(event) {
+    console.log('Connection closed');
+    setTimeout(initWebSocket, 2000);
+  }
+  function onMessage(event) {
+    const obj = JSON.parse(event.data);
+    document.getElementById(obj.name).innerHTML = obj.value;
+  }
+  function onLoad(event) {
+    initWebSocket();
+  }
+</script>
+</body>
+</html>

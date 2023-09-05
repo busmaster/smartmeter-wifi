@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Smart Meter Wifi</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" type="text/css" href="style.css">
+</head>
+<body>
+  <div class="topnav">
+    <h1>Smart Meter Wifi</h1>
+  </div>
+  <div class="content">
+    <div class="card-grid">
+      <div class="card">
+        <form action="/mqtt" method="POST">
+          <p>
+            <label for="broker">Broker</label>
+            <input type="text" id ="mqttbroker" name="mqtt-broker" value="broker"><br>
+            <label for="port">Port</label>
+            <input type="text" id ="mqttport" name="mqtt-port" value="port"><br>
+            <label for="topic">Topic</label>
+            <input type="text" id ="mqtttopic" name="mqtt-topic" value="topic"><br>
+            <input type ="submit" value ="Submit">
+          </p>
+        </form>
+      </div>
+    </div>
+  </div>
+</body>
+</html>

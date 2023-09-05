@@ -288,7 +288,7 @@ public:
         }
     }
 
-    inline esp_err_t tx_blocking(uint8_t *data, size_t len, uint32_t timeout_ms = 100)
+    inline esp_err_t tx_blocking(const uint8_t *data, size_t len, uint32_t timeout_ms = 100)
     {
         return ftd232_host_data_tx_blocking(this->ftd232_hdl, data, len, timeout_ms);
     }

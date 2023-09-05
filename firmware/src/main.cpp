@@ -1,6 +1,10 @@
 #include <WiFi.h>
-#include <WiFiClient.h>
-#include <WebServer.h>
+#include <AsyncTCP.h>
+#include <ESPAsyncWebServer.h>
+#include <AsyncElegantOTA.h>
+#include <SPIFFS.h>
+
+#include <espMqttClient.h>
 
 #include "esp_system.h"
 #include "esp_log.h"
@@ -10,79 +14,12 @@
 #include "freertos/task.h"
 #include "freertos/semphr.h"
 
-#include <HTTPUpdateServer.h>
-#include "usb/usb_host.h"
-#include "usb/ftd232_host.h"
-
 #include "aes.h"
-
-WebServer server(80);
-HTTPUpdateServer httpUpdater;
-
-const char* ssid = "xxx";
-const char* password = "xxx";
-
-#define USB_HOST_PRIORITY   20
-#define USB_DEVICE_VID      0x0403
-#define USB_DEVICE_PID      0x6001
+#include "usb/usb.h"
 
 
-#define LED_PRIORITY        1
-
-/* FTD232 */
-#define FT_SIO_SET_BAUDRATE_REQUEST_TYPE    0x40
-#define FT_SIO_SET_BAUDRATE_REQUEST         3
-
-#define FT_SIO_SET_DATA_REQUEST             4
-#define FT_SIO_SET_DATA_PARITY_EVEN         (0x2 << 8)
-#define FT_SIO_SET_DATA_STOP_BITS_1         (0x0 << 11)
-
-/* line status */
-#define FT_OE      (1<<1)
-#define FT_PE      (1<<2)
-#define FT_FE      (1<<3)
-#define FT_BI      (1<<4)
-
-static const char *TAG = "USB-FTD232";
-static SemaphoreHandle_t device_disconnected_sem;
-
-static void usb_lib_task(void *arg)
-{
-    esp_err_t err;
-    while (1) {
-        // Start handling system events
-        uint32_t event_flags;
-        err = usb_host_lib_handle_events(portMAX_DELAY, &event_flags);
-        if (event_flags & USB_HOST_LIB_EVENT_FLAGS_NO_CLIENTS) {
-            ESP_ERROR_CHECK(usb_host_device_free_all());
-        }
-        if (event_flags & USB_HOST_LIB_EVENT_FLAGS_ALL_FREE) {
-            // Continue handling USB events to allow device reconnection
-        }
-    }
-}
-
-static bool in_sync;
-
-static void Comm_init(ftd232_dev_hdl_t ftd232_dev) {
-
-    in_sync = false;
-    ftd232_host_send_control_request(ftd232_dev, FT_SIO_SET_BAUDRATE_REQUEST_TYPE, FT_SIO_SET_BAUDRATE_REQUEST, 0x4138, 0, 0, 0);
-    ftd232_host_send_control_request(ftd232_dev, FT_SIO_SET_BAUDRATE_REQUEST_TYPE, FT_SIO_SET_DATA_REQUEST,  FT_SIO_SET_DATA_PARITY_EVEN | FT_SIO_SET_DATA_STOP_BITS_1 | 8, 0, 0, 0);
-
-}
-
-static void Led_task(void *arg) {
-
-
-    while (1) {
-        vTaskSuspend(0);
-    }
-}
-
+/* MBUS telegram */
 #define METER_TELEGRAM_SIZE                 101
-
-
 #define SEARCH_ACK   0xe5
 
 /* byte offsets of MBUS */
@@ -97,43 +34,94 @@ static void Led_task(void *arg) {
 
 #define AES_KEY_LEN                         16
 #define AES_IV_LEN                          16
-static unsigned char key[AES_KEY_LEN] = { 0xbb, 0x35, 0x59, 0x8d, 0x97, 0xc6, 0xa3, 0x1a, 0x29, 0x2b, 0x5c, 0xe8, 0xee, 0xda, 0xe5, 0x7a };
-/* lower half of iv is the secondary address - it's the same for all EAG meters */
-static unsigned char iv[AES_IV_LEN]  = { 0x2d, 0x4c, 0x00, 0x00, 0x00, 0x00, 0x01, 0x0e, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
-
-static uint8_t pay_load[MBUS_PAYLOAD_SIZE];
 
 
-uint32_t pplus;
-uint32_t pminus;
-uint32_t aplus;
-uint32_t aminus;
+static AsyncWebServer server(80);
+static AsyncWebSocket ws("/ws");
 
-static bool handle_rx(const uint8_t *data, size_t data_len, void *arg)
+//Variables to save values from HTML form
+static String aeskey;
+static String smartmeter_html;
+static String mqttbroker;
+static int    mqttport;
+static String mqtttopic;
+static String mqtt_html;
+static String ssid;
+static String pass;
+static String wlan_html;
+
+// File paths to save input values permanently
+static const char* ssidPath = "/ssid.txt";
+static const char* passPath = "/pass.txt";
+static const char* aeskeyPath = "/aeskey.txt";
+static const char* mqttbrokerPath = "/mqttbroker.txt";
+static const char* mqttportPath = "/mqttport.txt";
+static const char* mqtttopicPath = "/mqtttopic.txt";
+
+static espMqttClient mqttClient;
+static bool reconnectMqtt = false;
+static uint32_t lastReconnectMqttMs = 0;
+
+// Set LED GPIO
+static const int ledPin = 37;
+static int ledState = 0;
+
+static unsigned char aesKeyArray[AES_KEY_LEN];
+
+static uint32_t pplus;
+static uint32_t pminus;
+static uint32_t aplus;
+static uint32_t aminus;
+static uint32_t qplus;
+static uint32_t qminus;
+static uint32_t rplus;
+static uint32_t rminus;
+
+static bool usbRxInSync;
+static tx_func usbTx;
+
+static void WsNotifyClients(const char *name, uint32_t val) {
+    char json[50];
+    snprintf(json, sizeof(json), "{\"name\":\"%s\", \"value\":\"%u\"}", name, val);
+    ws.textAll(json);
+}
+
+static void UsbNewDev(void *hdl) {
+
+    usbRxInSync = false;
+}
+
+static bool UsbRx(const uint8_t *data, size_t dataLen, void *arg)
 {
-    static uint8_t search_seq[] = { 0x10, 0x40, 0xf0, 0x30, 0x16 }; /* SND_NKE for 240 */
-    static uint8_t counter_seq[] = { 0x68, 0x5f, 0x5f, 0x68, 0x53, 0xf0, 0x5b, 0x00, 0x00, 0x00, 0x00, 0x2d, 0x4, 0x01, 0x0e};
-    ftd232_dev_hdl_t *dev = (ftd232_dev_hdl_t *)arg;
-    bool send_req = false;
+    static uint8_t searchSeq[] = { 0x10, 0x40, 0xf0, 0x30, 0x16 }; /* SND_NKE for 240 */
+    static uint8_t payload[MBUS_PAYLOAD_SIZE];
+    /* lower half of iv is the secondary address - it's the same for all EAG meters */
+    static unsigned char iv[AES_IV_LEN]  = { 0x2d, 0x4c, 0x00, 0x00, 0x00, 0x00, 0x01, 0x0e, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
+    bool sendReq = false;
     bool ret = false;
     uint8_t checksum;
     int i;
 
-    if (!in_sync) {
-        if (data_len < sizeof(search_seq)) {
+    if (!usbRxInSync) {
+        if (dataLen < sizeof(searchSeq)) {
             return false;
-        } if (data_len > sizeof(search_seq)) {
+        } if (dataLen > sizeof(searchSeq)) {
             return true;
         }
     }
 
-    if ((data_len == sizeof(search_seq)) && (memcmp(search_seq, data, sizeof(search_seq)) == 0)) {
-        send_req = true;
+    if (ledState == 0) {
+        digitalWrite(ledPin, HIGH);
+        ledState = 1;
+    }
+
+    if ((dataLen == sizeof(searchSeq)) && (memcmp(searchSeq, data, sizeof(searchSeq)) == 0)) {
+        sendReq = true;
         ret = true;
-        in_sync = true;
-    } else if (data_len == METER_TELEGRAM_SIZE) {
+        usbRxInSync = true;
+    } else if (dataLen == METER_TELEGRAM_SIZE) {
         ret = true;
-        send_req = true;
+        sendReq = true;
         checksum = 0;
         for (i = MBUS_CHECKSUM_START_OFFS; i <= MBUS_CHECKSUM_END_OFFS; i++) {
             checksum += data[i];
@@ -143,157 +131,434 @@ static bool handle_rx(const uint8_t *data, size_t data_len, void *arg)
             for (i = 8; i < 16; i++) {
                 iv[i] = data[MBUS_ACCESS_NUMBER_OFFS];
             }
-            AES128_CBC_decrypt_buffer(pay_load, (uint8_t *)&data[MBUS_PAYLOAD_OFFS], sizeof(pay_load), key, iv);
+            AES128_CBC_decrypt_buffer(payload, (uint8_t *)&data[MBUS_PAYLOAD_OFFS], sizeof(payload), aesKeyArray, iv);
 
-            pplus =  (uint32_t)pay_load[44] | ((uint32_t)pay_load[45] << 8) | ((uint32_t)pay_load[46] << 16) | ((uint32_t)pay_load[47] << 24);
-            pminus = (uint32_t)pay_load[51] | ((uint32_t)pay_load[52] << 8) | ((uint32_t)pay_load[53] << 16) | ((uint32_t)pay_load[54] << 24);
-            aplus =  (uint32_t)pay_load[12] | ((uint32_t)pay_load[13] << 8) | ((uint32_t)pay_load[14] << 16) | ((uint32_t)pay_load[15] << 24);
-            aminus = (uint32_t)pay_load[19] | ((uint32_t)pay_load[20] << 8) | ((uint32_t)pay_load[21] << 16) | ((uint32_t)pay_load[22] << 24);
+            pplus =  (uint32_t)payload[44] | ((uint32_t)payload[45] << 8) | ((uint32_t)payload[46] << 16) | ((uint32_t)payload[47] << 24);
+            pminus = (uint32_t)payload[51] | ((uint32_t)payload[52] << 8) | ((uint32_t)payload[53] << 16) | ((uint32_t)payload[54] << 24);
+            qplus =  (uint32_t)payload[58] | ((uint32_t)payload[59] << 8) | ((uint32_t)payload[60] << 16) | ((uint32_t)payload[61] << 24);
+            qminus = (uint32_t)payload[66] | ((uint32_t)payload[67] << 8) | ((uint32_t)payload[68] << 16) | ((uint32_t)payload[69] << 24);
+            aplus =  (uint32_t)payload[12] | ((uint32_t)payload[13] << 8) | ((uint32_t)payload[14] << 16) | ((uint32_t)payload[15] << 24);
+            aminus = (uint32_t)payload[19] | ((uint32_t)payload[20] << 8) | ((uint32_t)payload[21] << 16) | ((uint32_t)payload[22] << 24);
+            rplus =  (uint32_t)payload[28] | ((uint32_t)payload[29] << 8) | ((uint32_t)payload[30] << 16) | ((uint32_t)payload[31] << 24);
+            rminus = (uint32_t)payload[38] | ((uint32_t)payload[39] << 8) | ((uint32_t)payload[40] << 16) | ((uint32_t)payload[41] << 24);
 
-            ESP_LOGD(TAG, "P+: %d W\n", pplus);
-            ESP_LOGD(TAG, "P-: %d W\n", pminus);
-            ESP_LOGD(TAG, "A+: %d Wh\n", aplus);
-            ESP_LOGD(TAG, "A-: %d Wh\n", aminus);
+            ESP_LOGD(TAG, "P+: %d W", pplus);
+            ESP_LOGD(TAG, "P-: %d W", pminus);
+            ESP_LOGD(TAG, "A+: %d Wh", aplus);
+            ESP_LOGD(TAG, "A-: %d Wh", aminus);
+            ESP_LOGD(TAG, "Q+: %d var", qplus);
+            ESP_LOGD(TAG, "Q-: %d var", qminus);
+            ESP_LOGD(TAG, "R+: %d varh", rplus);
+            ESP_LOGD(TAG, "R-: %d varh", rminus);
+
+            if (mqttClient.connected()) {
+                char message[256];
+                snprintf(message, sizeof(message), 
+                    "{\"counter\":{\"A+\":%u,\"A-\":%u,\"R+\":%u,\"R-\":%u},\"power\":{\"P+\":%u,\"P-\":%u,\"Q+\":%u,\"Q-\":%u}}",
+                    aplus, aminus, rplus, rminus, pplus, pminus, qplus, qminus);
+                mqttClient.publish(mqtttopic.c_str(), 1, true, message);
+            }
+            if (ws.availableForWriteAll()) {
+                WsNotifyClients("pplus",  pplus);
+                WsNotifyClients("pminus", pminus);
+                WsNotifyClients("aplus",  aplus);
+                WsNotifyClients("aminus", aminus);
+                WsNotifyClients("qplus",  qplus);
+                WsNotifyClients("qminus", qminus);
+                WsNotifyClients("rplus",  rplus);
+                WsNotifyClients("rminus", rminus);
+            }
         } else {
-            in_sync = false;
-             ESP_LOGE(TAG, "checksum error\n");
+            usbRxInSync = false;
+            Serial.printf("checksum error\r\n");
         }
-    } else if (data_len > METER_TELEGRAM_SIZE) {
-        in_sync = false;
+    } else if (dataLen > METER_TELEGRAM_SIZE) {
+        usbRxInSync = false;
         ret = true;
     }
 
-    if (send_req) {
-        const uint8_t tx_buf[] = { 0x05, SEARCH_ACK };
-        ftd232_host_data_tx_blocking(*dev, tx_buf, sizeof(tx_buf), 100);
+    if (sendReq) {
+        const uint8_t buf[] = { 0x05, SEARCH_ACK };
+        if (usbTx) {
+            usbTx(arg, buf, sizeof(buf), 100);
+        }
+        digitalWrite(ledPin, LOW);
+        ledState = 0;
     }
 
     return ret;
 }
 
-static void handle_event_ftd232(const ftd232_host_dev_event_data_t *event, void *user_ctx)
-{
-    switch (event->type) {
-        case FTD232_HOST_ERROR:
-            ESP_LOGE(TAG, "FTD232 error has occurred, err_no = %d\n", event->data.error);
-            break;
-        case FTD232_HOST_DEVICE_DISCONNECTED:
-            ESP_LOGD(TAG, "Device suddenly disconnected\n");
-            ESP_ERROR_CHECK(ftd232_host_close(event->data.ftd232_hdl));
-            xSemaphoreGive(device_disconnected_sem);
-            break;
-        case FTD232_HOST_SERIAL_RXBUFFEROVERRUN:
-            ESP_LOGE(TAG, "Rx buffer overrun\n");
-            break;
-        case FTD232_HOST_SERIAL_LINESTAT:
-            ESP_LOGW(TAG, "Line stat %02x\n", event->data.serial_state.val);
-            break;
-        default:
-            ESP_LOGW(TAG,"Unsupported FTD232: %d\n", event->type);
-            break;
+// Read File from SPIFFS
+static String readFile(fs::FS &fs, const char * path) {
+  
+    Serial.printf("Reading file: %s\r\n", path);
+
+    File file = fs.open(path);
+    if (!file || file.isDirectory()) {
+        Serial.println("- failed to open file for reading");
+        return String();
+    }
+  
+    String fileContent;
+    while (file.available()) {
+        fileContent = file.readString();
+        break;     
+    }
+    file.close();
+   
+    return fileContent;
+}
+
+// Write file to SPIFFS
+static void writeFile(fs::FS &fs, const char *path, const char *message) {
+
+    Serial.printf("Writing file: %s\r\n", path);
+
+    File file = fs.open(path, FILE_WRITE);
+    if (!file) {
+        Serial.println("- failed to open file for writing");
+        return;
+    }
+
+    if (file.print(message)){
+        Serial.println("- file written");
+    } else {
+        Serial.println("- write failed");
+    }
+    file.close();
+}
+
+
+static void InitWiFi() {
+
+    char ssid_ap[5 /* 'smif-' */ + 16 /* max uint64_t hex string length */ + 1 /* 0 term */];
+
+    WiFi.mode(WIFI_MODE_APSTA /*WIFI_STA*/);
+    snprintf(ssid_ap, sizeof(ssid_ap), "smif-%llx", ESP.getEfuseMac());
+    WiFi.softAP(ssid_ap, "smifwifi");
+    IPAddress IP = WiFi.softAPIP();
+    Serial.print("AP IP address: ");
+    Serial.println(IP);
+
+    if (!ssid.isEmpty() && !pass.isEmpty()) {
+        WiFi.begin(ssid.c_str(), pass.c_str());
+
+        Serial.println("Connecting to WiFi...");
+        unsigned long currentMillis = millis();
+        unsigned long startMillis = currentMillis;
+        while (WiFi.status() != WL_CONNECTED) {
+            currentMillis = millis();
+            if ((currentMillis - startMillis) >= 10000) {
+                Serial.println("Failed to connect.");
+                return;
+            }
+        }
+        Serial.print("IP address: ");
+        Serial.println(WiFi.localIP());
     }
 }
 
-static void main_task(void *arg) {
+static void Set_key(String aeskey) {
 
-    esp_err_t err;
-    BaseType_t task_created;
-    TaskHandle_t comm_task;
-    ftd232_dev_hdl_t ftd232_dev;
-
-    device_disconnected_sem = xSemaphoreCreateBinary();
-
-    const ftd232_host_device_config_t dev_config = {
-        .connection_timeout_ms = 1000,
-        .out_buffer_size = 512,
-        .in_buffer_size = 512,
-        .event_cb = handle_event_ftd232,
-        .data_cb = handle_rx,
-        .user_arg = &ftd232_dev
-    };
-
-    usb_host_config_t host_config = {
-        .skip_phy_setup = false,
-        .intr_flags = ESP_INTR_FLAG_LEVEL1,
-    };
-    err = usb_host_install(&host_config);
-
-    task_created = xTaskCreate(usb_lib_task, "usb_lib", 4096, 0, USB_HOST_PRIORITY, NULL);
-    err = ftd232_host_install(0);
-
-    task_created = xTaskCreate(Led_task, "led_task", 4096, 0, LED_PRIORITY, 0);
-
-    vTaskDelay(pdMS_TO_TICKS(1000));
-
-    while(1) {
-        ftd232_dev = 0;
-        err = ftd232_host_open(USB_DEVICE_VID, USB_DEVICE_PID, &dev_config, &ftd232_dev);
-        if (ESP_OK != err) {
-            vTaskDelay(pdMS_TO_TICKS(100));
-            continue;
-        }
-
-//      ftd232_host_desc_print(ftd232_dev);
-
-        Comm_init(ftd232_dev);
-
-        xSemaphoreTake(device_disconnected_sem, portMAX_DELAY);
+    char str[48];
+    int i = 0;
+    snprintf(str, sizeof(str), "%s", aeskey.c_str());
+    char *tok = strtok(str, " ");
+    while ((i < sizeof(aesKeyArray)) && (tok != 0)) {
+        aesKeyArray[i] = (uint8_t)strtoul(tok, 0, 16);
+        i++;
+        tok = strtok(0, " ");
     }
+}
+
+static void ConnectToMqtt(void) {
+  Serial.println("Connecting to MQTT...");
+  if (!mqttClient.connect()) {
+    reconnectMqtt = true;
+    lastReconnectMqttMs = millis();
+    Serial.println("Connecting failed.");
+  } else {
+    reconnectMqtt = false;
+  }
+}
+
+static void OnMqttConnect(bool sessionPresent) {
+  Serial.println("Connected to MQTT.");
+  Serial.print("Session present: ");
+  Serial.println(sessionPresent);
+}
+
+static void OnMqttDisconnect(espMqttClientTypes::DisconnectReason reason) {
+  Serial.printf("Disconnected from MQTT: %u.\n", static_cast<uint8_t>(reason));
+
+  if (WiFi.isConnected()) {
+    reconnectMqtt = true;
+    lastReconnectMqttMs = millis();
+  }
+}
+
+static void OnEvent(AsyncWebSocket *server, AsyncWebSocketClient *client, AwsEventType type,
+             void *arg, uint8_t *data, size_t len) {
+    switch (type) {
+    case WS_EVT_CONNECT:
+        Serial.printf("WebSocket client #%u connected from %s\n", client->id(), client->remoteIP().toString().c_str());
+        break;
+    case WS_EVT_DISCONNECT:
+        Serial.printf("WebSocket client #%u disconnected\n", client->id());
+        break;
+    case WS_EVT_DATA:
+    case WS_EVT_PONG:
+    case WS_EVT_ERROR:
+        Serial.printf("WebSocket WS_EVT_DATA WS_EVT_ERROR WS_EVT_PONG\r\n");
+        break;
+   }
+}
+
+void initWebSocket() {
+  ws.onEvent(OnEvent);
+  server.addHandler(&ws);
+}
+
+String processor(const String& var){
+  if (var == "PPLUS"){
+    return String(pplus);
+  } else if (var == "PMINUS"){
+    return String(pminus);
+  } else if (var == "QPLUS"){
+    return String(qplus);
+  } else if (var == "QMINUS"){
+    return String(qminus);
+  } else if (var == "APLUS"){
+    return String(aplus);
+  } else if (var == "AMINUS"){
+    return String(aminus);
+  } else if (var == "RPLUS"){
+    return String(rplus);
+  } else if (var == "RMINUS"){
+    return String(rminus);
+  }
+  return String();
 }
 
 void setup() {
 
-    Serial.begin(115200);  
+    pinMode(ledPin, OUTPUT);
+    digitalWrite(ledPin, HIGH);
+    ledState = 1;
 
-    WiFi.mode(WIFI_STA);
-    delay(100);
+    Serial.begin(115200);
 
-    WiFi.begin(ssid, password);
-
-    while (WiFi.status() != WL_CONNECTED) {
-        delay(500);
-        Serial.print(".");
+    if (!SPIFFS.begin(true)) {
+       Serial.println("SPIFFS error");
     }
-    Serial.println("");
-    Serial.print("IP Addresse: ");
-    Serial.println(WiFi.localIP());
 
-  server.on("/", [](){
-    String msg = "<H1>smif</H1>\n";
-    msg += "uptime " + String(millis() / 1000) + "s<br />\n";
-    msg += "<H2>Befehle</H2>\n<p>";
-    msg += "<a href=\"update\">Update</a><br />\n";
-    msg += "</p>\n";
-    msg += "<H2>WiFi</H2>\n<p>";
-    msg += "IP: " + WiFi.localIP().toString() + "<br />\n";
-    msg += "Mask: " + WiFi.subnetMask().toString() + "<br />\n";
-    msg += "GW: " + WiFi.gatewayIP().toString() + "<br />\n";
-    msg += "MAC: " + WiFi.macAddress() + "<br />\n";
-    msg += "SSID: " + String(WiFi.SSID()) + "<br />\n";
-    msg += "RSSI: " + String(WiFi.RSSI()) + "<br />\n";
-    msg += "<H2>Meter</H2>\n<p>";
-    msg += "P+: " + String(pplus) + " W<br />\n";
-    msg += "P-: " + String(pminus) + " W<br />\n";
-    msg += "A+: " + String(aplus) + " Wh<br />\n";
-    msg += "A-: " + String(aminus) + " Wh<br />\n";
-    msg += "</p>\n";
-    server.send(200, "text/html", msg);
-    server.send(302, "text/plain", "");
-  });
+    // Load values saved in SPIFFS
+    ssid = readFile(SPIFFS, ssidPath);
+    pass = readFile(SPIFFS, passPath);
+    aeskey = readFile(SPIFFS, aeskeyPath);
+    mqttbroker = readFile(SPIFFS, mqttbrokerPath);
+    String port = readFile(SPIFFS, mqttportPath);
+    if (port) {
+        mqttport = strtol(port.c_str(), 0, 10);
+    }
+    mqtttopic = readFile(SPIFFS, mqtttopicPath);
 
-    httpUpdater.setup(&server);
+    Serial.printf("\r\nConfiguration:\r\n");
+    Serial.printf("ssid: %s\r\n", ssid.c_str());
+    Serial.printf("pass: %s\r\n", pass.c_str());
+    Serial.printf("aeskey: %s\r\n", aeskey.c_str());
+    Serial.printf("mqttbroker: %s\r\n", mqttbroker.c_str());
+    Serial.printf("mqttport: %d\r\n", mqttport);
+    Serial.printf("mqtttopic: %s\r\n\r\n", mqtttopic.c_str());
 
+    Set_key(aeskey);
+
+    InitWiFi();
+
+    wlan_html = readFile(SPIFFS, "/wifimanager.html");
+    if (!ssid.isEmpty()) {
+        String str("value=\"");
+        str.concat(ssid);
+        str.concat("\"");
+        wlan_html.replace("value=\"ssid\"", str);
+    }
+    if (!pass.isEmpty()) {
+        String str("value=\"");
+        str.concat(pass);
+        str.concat("\"");
+        wlan_html.replace("value=\"pass\"", str);
+    }
+
+    // Route for root / web page
+    server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
+        if (ON_STA_FILTER(request)) {
+            request->send(SPIFFS, "/index.html", "text/html", false, processor);
+        } else if (ON_AP_FILTER(request)) {
+            request->send(200, "text/html", wlan_html);
+        }
+    });
+
+    server.on("/", HTTP_POST, [](AsyncWebServerRequest *request) {
+        if (ON_AP_FILTER(request)) {
+            int params = request->params();
+            for (int i = 0; i < params; i++) {
+                AsyncWebParameter* p = request->getParam(i);
+                if(p->isPost()) {
+                    if (p->name() == "ssid") {
+                        String str = p->value();
+                        Serial.printf("SSID set to: %s\r\n", str.c_str());
+                        writeFile(SPIFFS, ssidPath, str.c_str());
+                    } else if (p->name() == "pass") {
+                        String str = p->value();
+                        Serial.printf("Password set to: %s\r\n", str.c_str());
+                        writeFile(SPIFFS, passPath, str.c_str());
+                    }
+                }
+            }
+            request->send(200, "text/plain", "Done. ESP will restart...");
+            vTaskDelay(pdMS_TO_TICKS(3000));
+            ESP.restart();
+        }
+    });
+    server.serveStatic("/", SPIFFS, "/");
+
+    if (WiFi.status() == WL_CONNECTED) {
+        initWebSocket();
+
+        if (mqttbroker && mqttport && mqtttopic) {
+            mqttClient.onConnect(OnMqttConnect);
+            mqttClient.onDisconnect(OnMqttDisconnect);
+            mqttClient.setServer(mqttbroker.c_str(), mqttport);
+            ConnectToMqtt();
+        }
+
+        smartmeter_html = readFile(SPIFFS, "/smartmeter.html");
+        if (!aeskey.isEmpty()) {
+            String str("value=\"");
+            str.concat(aeskey);
+            str.concat("\"");
+            smartmeter_html.replace("value=\"00 11 22 33 44 55 66 77 88 99 aa bb cc dd ee ff\"", str);
+        }
+        server.on("/aeskey", HTTP_GET, [](AsyncWebServerRequest *request) {
+            request->send(200, "text/html", smartmeter_html);
+        });
+        server.on("/aeskey", HTTP_POST, [](AsyncWebServerRequest *request) {
+            AsyncWebParameter* p = request->getParam(0);
+            if(p->isPost()) {
+                Serial.printf("POST[%s]: %s\n", p->name().c_str(), p->value().c_str());
+                if (p->name() == "aes-key") {
+                    String str = p->value();
+                    Serial.printf("AES-Key set to: %s\r\n", str.c_str());
+                    // Write file to save value
+                    writeFile(SPIFFS, aeskeyPath, str.c_str());
+                }
+            }
+            request->send(200, "text/plain", "Done. ESP will restart...");
+            vTaskDelay(pdMS_TO_TICKS(3000));
+            ESP.restart();
+        });
+
+        mqtt_html = readFile(SPIFFS, "/mqtt.html");
+        if (!mqttbroker.isEmpty()) {
+            String str("value=\"");
+            str.concat(mqttbroker);
+            str.concat("\"");
+            mqtt_html.replace("value=\"broker\"", str);
+        }
+        if (mqttport != 0) {
+            String str("value=\"");
+            str.concat(mqttport);
+            str.concat("\"");
+            mqtt_html.replace("value=\"port\"", str);
+        }
+        if (!mqtttopic.isEmpty()) {
+            String str("value=\"");
+            str.concat(mqtttopic);
+            str.concat("\"");
+            mqtt_html.replace("value=\"topic\"", str);
+        }
+        server.on("/mqtt", HTTP_GET, [](AsyncWebServerRequest *request) {
+            request->send(200, "text/html", mqtt_html);
+        });
+        server.on("/mqtt", HTTP_POST, [](AsyncWebServerRequest *request) {
+            int params = request->params();
+            for (int i = 0; i < params; i++) {
+                AsyncWebParameter* p = request->getParam(i);
+                if (p->isPost()) {
+                    Serial.printf("POST[%s]: %s\n", p->name().c_str(), p->value().c_str());
+                    if (p->name() == "mqtt-broker") {
+                        String str = p->value();
+                        Serial.printf("mqtt broker set to: %s\r\n", str.c_str());
+                        // Write file to save value
+                        writeFile(SPIFFS, mqttbrokerPath, str.c_str());
+                    } else if (p->name() == "mqtt-port") {
+                        String str = p->value();
+                        Serial.printf("mqtt broker port set to: %s\r\n", str.c_str());
+                        // Write file to save value
+                        writeFile(SPIFFS, mqttportPath, str.c_str());
+                    } else if (p->name() == "mqtt-topic") {
+                        String str = p->value();
+                        Serial.printf("mqtt topic set to: %s\r\n", str.c_str());
+                        // Write file to save value
+                        writeFile(SPIFFS, mqtttopicPath, str.c_str());
+                    }
+                }
+            }
+            request->send(200, "text/plain", "Done. ESP will restart...");
+            vTaskDelay(pdMS_TO_TICKS(3000));
+            ESP.restart();
+        });
+
+        server.on("/wlan", HTTP_GET, [](AsyncWebServerRequest *request) {
+            request->send(200, "text/html", wlan_html);
+        });        
+        server.on("/wlan", HTTP_POST, [](AsyncWebServerRequest *request) {
+            int params = request->params();
+            for (int i = 0; i < params; i++) {
+                AsyncWebParameter* p = request->getParam(i);
+                if(p->isPost()) {
+                    if (p->name() == "ssid") {
+                        String str = p->value();
+                        Serial.printf("SSID set to: %s\r\n", str.c_str());
+                        writeFile(SPIFFS, ssidPath, str.c_str());
+                    } else if (p->name() == "pass") {
+                        String str = p->value();
+                        Serial.printf("Password set to: %s\r\n", str.c_str());
+                        writeFile(SPIFFS, passPath, str.c_str());
+                    }
+                }
+            }
+            request->send(200, "text/plain", "Done. ESP will restart...");
+            vTaskDelay(pdMS_TO_TICKS(3000));
+            ESP.restart();
+        });
+
+        AsyncElegantOTA.begin(&server);
+    }
     server.begin();
-    Serial.println("HTTP Server gestartet");
 
-    pinMode(37, OUTPUT);
-    digitalWrite(37, HIGH);
+    digitalWrite(ledPin, LOW);
+    ledState = 0;
 
-    
-    xTaskCreate(main_task, "main_task", 4096, 0, 2, NULL);
+    UsbInit(UsbRx, &usbTx, UsbNewDev);
+
 }
 
 void loop() {
 
-    server.handleClient();
+    uint32_t currentMillis = millis();
+    static bool ap = true;
+
+    if (reconnectMqtt && ((currentMillis - lastReconnectMqttMs) > 5000)) {
+        ConnectToMqtt();
+    }
+
+    ws.cleanupClients();
+
+    if (ap && (millis() > (5 * 60 * 1000))) {
+        Serial.printf("Stop AP\r\n");
+        WiFi.mode(WIFI_STA);
+        ap = false;
+    }
 }

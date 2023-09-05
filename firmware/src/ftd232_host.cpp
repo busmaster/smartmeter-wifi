@@ -622,9 +622,10 @@ esp_err_t ftd232_host_open(uint16_t vid, uint16_t pid, const ftd232_host_device_
     // Find underlying USB device
     ftd232_dev_t *ftd232_dev;
 
-    ESP_GOTO_ON_ERROR(
-        ftd232_find_and_open_usb_device(vid, pid, dev_config->connection_timeout_ms, &ftd232_dev),
-        exit, TAG, "USB device with VID: 0x%04X, PID: 0x%04X not found", vid, pid);
+    ret = ftd232_find_and_open_usb_device(vid, pid, dev_config->connection_timeout_ms, &ftd232_dev);
+    if (ret != ESP_OK) {
+        goto exit;
+    }
 
     // Find and save relevant interface and endpoint descriptors
     ESP_GOTO_ON_ERROR(
@@ -933,6 +934,7 @@ static void usb_event_cb(const usb_host_client_event_msg_t *event_msg, void *arg
 esp_err_t ftd232_host_data_tx_blocking(ftd232_dev_hdl_t ftd232_dev_hdl, const uint8_t *data, size_t data_len, uint32_t timeout_ms)
 {
     esp_err_t ret;
+
     FTD232_CHECK(ftd232_dev_hdl, ESP_ERR_INVALID_ARG);
     ftd232_dev_t *ftd232_dev = (ftd232_dev_t *)ftd232_dev_hdl;
     FTD232_CHECK(data && (data_len > 0), ESP_ERR_INVALID_ARG);
