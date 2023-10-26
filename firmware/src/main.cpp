@@ -59,8 +59,10 @@ static const char* mqttportPath = "/mqttport.txt";
 static const char* mqtttopicPath = "/mqtttopic.txt";
 
 static espMqttClient mqttClient;
-static bool reconnectMqtt = false;
-static uint32_t lastReconnectMqttMs = 0;
+static bool reconnectMqtt;
+static uint32_t lastReconnectMqttMs;
+
+static uint32_t lastReconnectWifiMs;
 
 // Set LED GPIO
 static const int ledPin = 37;
@@ -273,29 +275,29 @@ static void Set_key(String aeskey) {
 }
 
 static void ConnectToMqtt(void) {
-  Serial.println("Connecting to MQTT...");
-  if (!mqttClient.connect()) {
-    reconnectMqtt = true;
-    lastReconnectMqttMs = millis();
-    Serial.println("Connecting failed.");
-  } else {
-    reconnectMqtt = false;
-  }
+    Serial.println("Connecting to MQTT...");
+    if (!mqttClient.connect()) {
+        reconnectMqtt = true;
+        lastReconnectMqttMs = millis();
+        Serial.println("Connecting failed.");
+    } else {
+        reconnectMqtt = false;
+    }
 }
 
 static void OnMqttConnect(bool sessionPresent) {
-  Serial.println("Connected to MQTT.");
-  Serial.print("Session present: ");
-  Serial.println(sessionPresent);
+    Serial.println("Connected to MQTT.");
+    Serial.print("Session present: ");
+    Serial.println(sessionPresent);
 }
 
 static void OnMqttDisconnect(espMqttClientTypes::DisconnectReason reason) {
-  Serial.printf("Disconnected from MQTT: %u.\n", static_cast<uint8_t>(reason));
+    Serial.printf("Disconnected from MQTT: %u.\n", static_cast<uint8_t>(reason));
 
-  if (WiFi.isConnected()) {
-    reconnectMqtt = true;
-    lastReconnectMqttMs = millis();
-  }
+    if (WiFi.isConnected()) {
+        reconnectMqtt = true;
+        lastReconnectMqttMs = millis();
+    }
 }
 
 static void OnEvent(AsyncWebSocket *server, AsyncWebSocketClient *client, AwsEventType type,
@@ -341,8 +343,172 @@ String processor(const String& var){
   return String();
 }
 
-void setup() {
+static void RouteWebpages(void) {
 
+    // Route for root / web page
+    server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
+        if (ON_STA_FILTER(request)) {
+            request->send(SPIFFS, "/index.html", "text/html", false, processor);
+        } else if (ON_AP_FILTER(request)) {
+            request->send(200, "text/html", wlan_html);
+        }
+    });
+
+    server.on("/", HTTP_POST, [](AsyncWebServerRequest *request) {
+        if (ON_AP_FILTER(request)) {
+            int params = request->params();
+            for (int i = 0; i < params; i++) {
+                AsyncWebParameter* p = request->getParam(i);
+                if(p->isPost()) {
+                    if (p->name() == "ssid") {
+                        String str = p->value();
+                        Serial.printf("SSID set to: %s\r\n", str.c_str());
+                        writeFile(SPIFFS, ssidPath, str.c_str());
+                    } else if (p->name() == "pass") {
+                        String str = p->value();
+                        Serial.printf("Password set to: %s\r\n", str.c_str());
+                        writeFile(SPIFFS, passPath, str.c_str());
+                    }
+                }
+            }
+            request->send(200, "text/plain", "Done. ESP will restart...");
+            vTaskDelay(pdMS_TO_TICKS(3000));
+            ESP.restart();
+        }
+    });
+
+    server.on("/aeskey", HTTP_GET, [](AsyncWebServerRequest *request) {
+        if (ON_STA_FILTER(request)) {
+            request->send(200, "text/html", smartmeter_html);
+        }
+    });
+    server.on("/aeskey", HTTP_POST, [](AsyncWebServerRequest *request) {
+        if (ON_STA_FILTER(request)) {
+            AsyncWebParameter* p = request->getParam(0);
+            if(p->isPost()) {
+                Serial.printf("POST[%s]: %s\n", p->name().c_str(), p->value().c_str());
+                if (p->name() == "aes-key") {
+                    String str = p->value();
+                    Serial.printf("AES-Key set to: %s\r\n", str.c_str());
+                    // Write file to save value
+                    writeFile(SPIFFS, aeskeyPath, str.c_str());
+                }
+            }
+            request->send(200, "text/plain", "Done. ESP will restart...");
+            vTaskDelay(pdMS_TO_TICKS(3000));
+            ESP.restart();
+        }
+    });
+
+    server.on("/mqtt", HTTP_GET, [](AsyncWebServerRequest *request) {
+        if (ON_STA_FILTER(request)) {
+            request->send(200, "text/html", mqtt_html);
+        }
+    });
+    server.on("/mqtt", HTTP_POST, [](AsyncWebServerRequest *request) {
+        if (ON_STA_FILTER(request)) {
+            int params = request->params();
+            for (int i = 0; i < params; i++) {
+                AsyncWebParameter* p = request->getParam(i);
+                if (p->isPost()) {
+                    Serial.printf("POST[%s]: %s\n", p->name().c_str(), p->value().c_str());
+                    if (p->name() == "mqtt-broker") {
+                        String str = p->value();
+                        Serial.printf("mqtt broker set to: %s\r\n", str.c_str());
+                        // Write file to save value
+                        writeFile(SPIFFS, mqttbrokerPath, str.c_str());
+                    } else if (p->name() == "mqtt-port") {
+                        String str = p->value();
+                        Serial.printf("mqtt broker port set to: %s\r\n", str.c_str());
+                        // Write file to save value
+                        writeFile(SPIFFS, mqttportPath, str.c_str());
+                    } else if (p->name() == "mqtt-topic") {
+                        String str = p->value();
+                        Serial.printf("mqtt topic set to: %s\r\n", str.c_str());
+                        // Write file to save value
+                        writeFile(SPIFFS, mqtttopicPath, str.c_str());
+                    }
+                }
+            }
+            request->send(200, "text/plain", "Done. ESP will restart...");
+            vTaskDelay(pdMS_TO_TICKS(3000));
+            ESP.restart();
+        }
+    });
+    server.on("/wlan", HTTP_GET, [](AsyncWebServerRequest *request) {
+        if (ON_STA_FILTER(request)) {
+            request->send(200, "text/html", wlan_html);
+        }
+    });
+    server.on("/wlan", HTTP_POST, [](AsyncWebServerRequest *request) {
+        if (ON_STA_FILTER(request)) {
+            int params = request->params();
+            for (int i = 0; i < params; i++) {
+                AsyncWebParameter* p = request->getParam(i);
+                if(p->isPost()) {
+                    if (p->name() == "ssid") {
+                        String str = p->value();
+                        Serial.printf("SSID set to: %s\r\n", str.c_str());
+                        writeFile(SPIFFS, ssidPath, str.c_str());
+                    } else if (p->name() == "pass") {
+                        String str = p->value();
+                        Serial.printf("Password set to: %s\r\n", str.c_str());
+                        writeFile(SPIFFS, passPath, str.c_str());
+                    }
+                }
+            }
+            request->send(200, "text/plain", "Done. ESP will restart...");
+            vTaskDelay(pdMS_TO_TICKS(3000));
+            ESP.restart();
+        }
+    });
+}
+
+static void SetupHtml(void) {
+
+    wlan_html = readFile(SPIFFS, "/wifimanager.html");
+    if (!ssid.isEmpty()) {
+        String str("value=\"");
+        str.concat(ssid);
+        str.concat("\"");
+        wlan_html.replace("value=\"ssid\"", str);
+    }
+    if (!pass.isEmpty()) {
+        String str("value=\"");
+        str.concat(pass);
+        str.concat("\"");
+        wlan_html.replace("value=\"pass\"", str);
+    }
+    smartmeter_html = readFile(SPIFFS, "/smartmeter.html");
+    if (!aeskey.isEmpty()) {
+        String str("value=\"");
+        str.concat(aeskey);
+        str.concat("\"");
+        smartmeter_html.replace("value=\"00 11 22 33 44 55 66 77 88 99 aa bb cc dd ee ff\"", str);
+    }
+
+    mqtt_html = readFile(SPIFFS, "/mqtt.html");
+    if (!mqttbroker.isEmpty()) {
+        String str("value=\"");
+        str.concat(mqttbroker);
+        str.concat("\"");
+        mqtt_html.replace("value=\"broker\"", str);
+    }
+    if (mqttport != 0) {
+        String str("value=\"");
+        str.concat(mqttport);
+        str.concat("\"");
+        mqtt_html.replace("value=\"port\"", str);
+    }
+    if (!mqtttopic.isEmpty()) {
+        String str("value=\"");
+        str.concat(mqtttopic);
+        str.concat("\"");
+        mqtt_html.replace("value=\"topic\"", str);
+    }
+}
+
+void setup() {
     pinMode(ledPin, OUTPUT);
     digitalWrite(ledPin, HIGH);
     ledState = 1;
@@ -376,185 +542,51 @@ void setup() {
 
     InitWiFi();
 
-    wlan_html = readFile(SPIFFS, "/wifimanager.html");
-    if (!ssid.isEmpty()) {
-        String str("value=\"");
-        str.concat(ssid);
-        str.concat("\"");
-        wlan_html.replace("value=\"ssid\"", str);
-    }
-    if (!pass.isEmpty()) {
-        String str("value=\"");
-        str.concat(pass);
-        str.concat("\"");
-        wlan_html.replace("value=\"pass\"", str);
-    }
+    SetupHtml();
+    RouteWebpages();
 
-    // Route for root / web page
-    server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
-        if (ON_STA_FILTER(request)) {
-            request->send(SPIFFS, "/index.html", "text/html", false, processor);
-        } else if (ON_AP_FILTER(request)) {
-            request->send(200, "text/html", wlan_html);
-        }
-    });
-
-    server.on("/", HTTP_POST, [](AsyncWebServerRequest *request) {
-        if (ON_AP_FILTER(request)) {
-            int params = request->params();
-            for (int i = 0; i < params; i++) {
-                AsyncWebParameter* p = request->getParam(i);
-                if(p->isPost()) {
-                    if (p->name() == "ssid") {
-                        String str = p->value();
-                        Serial.printf("SSID set to: %s\r\n", str.c_str());
-                        writeFile(SPIFFS, ssidPath, str.c_str());
-                    } else if (p->name() == "pass") {
-                        String str = p->value();
-                        Serial.printf("Password set to: %s\r\n", str.c_str());
-                        writeFile(SPIFFS, passPath, str.c_str());
-                    }
-                }
-            }
-            request->send(200, "text/plain", "Done. ESP will restart...");
-            vTaskDelay(pdMS_TO_TICKS(3000));
-            ESP.restart();
-        }
-    });
     server.serveStatic("/", SPIFFS, "/");
 
-    if (WiFi.status() == WL_CONNECTED) {
-        initWebSocket();
-
-        if (mqttbroker && mqttport && mqtttopic) {
-            mqttClient.onConnect(OnMqttConnect);
-            mqttClient.onDisconnect(OnMqttDisconnect);
-            mqttClient.setServer(mqttbroker.c_str(), mqttport);
-            ConnectToMqtt();
-        }
-
-        smartmeter_html = readFile(SPIFFS, "/smartmeter.html");
-        if (!aeskey.isEmpty()) {
-            String str("value=\"");
-            str.concat(aeskey);
-            str.concat("\"");
-            smartmeter_html.replace("value=\"00 11 22 33 44 55 66 77 88 99 aa bb cc dd ee ff\"", str);
-        }
-        server.on("/aeskey", HTTP_GET, [](AsyncWebServerRequest *request) {
-            request->send(200, "text/html", smartmeter_html);
-        });
-        server.on("/aeskey", HTTP_POST, [](AsyncWebServerRequest *request) {
-            AsyncWebParameter* p = request->getParam(0);
-            if(p->isPost()) {
-                Serial.printf("POST[%s]: %s\n", p->name().c_str(), p->value().c_str());
-                if (p->name() == "aes-key") {
-                    String str = p->value();
-                    Serial.printf("AES-Key set to: %s\r\n", str.c_str());
-                    // Write file to save value
-                    writeFile(SPIFFS, aeskeyPath, str.c_str());
-                }
-            }
-            request->send(200, "text/plain", "Done. ESP will restart...");
-            vTaskDelay(pdMS_TO_TICKS(3000));
-            ESP.restart();
-        });
-
-        mqtt_html = readFile(SPIFFS, "/mqtt.html");
-        if (!mqttbroker.isEmpty()) {
-            String str("value=\"");
-            str.concat(mqttbroker);
-            str.concat("\"");
-            mqtt_html.replace("value=\"broker\"", str);
-        }
-        if (mqttport != 0) {
-            String str("value=\"");
-            str.concat(mqttport);
-            str.concat("\"");
-            mqtt_html.replace("value=\"port\"", str);
-        }
-        if (!mqtttopic.isEmpty()) {
-            String str("value=\"");
-            str.concat(mqtttopic);
-            str.concat("\"");
-            mqtt_html.replace("value=\"topic\"", str);
-        }
-        server.on("/mqtt", HTTP_GET, [](AsyncWebServerRequest *request) {
-            request->send(200, "text/html", mqtt_html);
-        });
-        server.on("/mqtt", HTTP_POST, [](AsyncWebServerRequest *request) {
-            int params = request->params();
-            for (int i = 0; i < params; i++) {
-                AsyncWebParameter* p = request->getParam(i);
-                if (p->isPost()) {
-                    Serial.printf("POST[%s]: %s\n", p->name().c_str(), p->value().c_str());
-                    if (p->name() == "mqtt-broker") {
-                        String str = p->value();
-                        Serial.printf("mqtt broker set to: %s\r\n", str.c_str());
-                        // Write file to save value
-                        writeFile(SPIFFS, mqttbrokerPath, str.c_str());
-                    } else if (p->name() == "mqtt-port") {
-                        String str = p->value();
-                        Serial.printf("mqtt broker port set to: %s\r\n", str.c_str());
-                        // Write file to save value
-                        writeFile(SPIFFS, mqttportPath, str.c_str());
-                    } else if (p->name() == "mqtt-topic") {
-                        String str = p->value();
-                        Serial.printf("mqtt topic set to: %s\r\n", str.c_str());
-                        // Write file to save value
-                        writeFile(SPIFFS, mqtttopicPath, str.c_str());
-                    }
-                }
-            }
-            request->send(200, "text/plain", "Done. ESP will restart...");
-            vTaskDelay(pdMS_TO_TICKS(3000));
-            ESP.restart();
-        });
-
-        server.on("/wlan", HTTP_GET, [](AsyncWebServerRequest *request) {
-            request->send(200, "text/html", wlan_html);
-        });        
-        server.on("/wlan", HTTP_POST, [](AsyncWebServerRequest *request) {
-            int params = request->params();
-            for (int i = 0; i < params; i++) {
-                AsyncWebParameter* p = request->getParam(i);
-                if(p->isPost()) {
-                    if (p->name() == "ssid") {
-                        String str = p->value();
-                        Serial.printf("SSID set to: %s\r\n", str.c_str());
-                        writeFile(SPIFFS, ssidPath, str.c_str());
-                    } else if (p->name() == "pass") {
-                        String str = p->value();
-                        Serial.printf("Password set to: %s\r\n", str.c_str());
-                        writeFile(SPIFFS, passPath, str.c_str());
-                    }
-                }
-            }
-            request->send(200, "text/plain", "Done. ESP will restart...");
-            vTaskDelay(pdMS_TO_TICKS(3000));
-            ESP.restart();
-        });
-
-        AsyncElegantOTA.begin(&server);
+    if (mqttbroker && mqttport && mqtttopic) {
+        mqttClient.onConnect(OnMqttConnect);
+        mqttClient.onDisconnect(OnMqttDisconnect);
+        mqttClient.setServer(mqttbroker.c_str(), mqttport);
+        ConnectToMqtt();
     }
+    initWebSocket();
+    AsyncElegantOTA.begin(&server);
     server.begin();
 
     digitalWrite(ledPin, LOW);
     ledState = 0;
 
     UsbInit(UsbRx, &usbTx, UsbNewDev);
-
 }
 
 void loop() {
 
     uint32_t currentMillis = millis();
     static bool ap = true;
+    static bool printip = true;
 
     if (reconnectMqtt && ((currentMillis - lastReconnectMqttMs) > 5000)) {
         ConnectToMqtt();
     }
 
     ws.cleanupClients();
+
+    if ((WiFi.status() != WL_CONNECTED) && ((currentMillis - lastReconnectWifiMs) >= 30000)) {
+        Serial.println("Reconnecting to WiFi...");
+        WiFi.reconnect();
+        lastReconnectWifiMs = currentMillis;
+        printip = true;
+    }
+
+    if ((WiFi.status() == WL_CONNECTED) && printip) {
+        Serial.print("IP address: ");
+        Serial.println(WiFi.localIP());
+        printip = false;
+    }
 
     if (ap && (millis() > (5 * 60 * 1000))) {
         Serial.printf("Stop AP\r\n");
