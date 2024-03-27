@@ -462,6 +462,37 @@ static void RouteWebpages(void) {
             ESP.restart();
         }
     });
+    server.on("/info", HTTP_GET, [](AsyncWebServerRequest *request) {
+        if (ON_STA_FILTER(request)) {
+            String info;
+            char buf[3];
+            int64_t ts = esp_timer_get_time() / 1000000;
+            uint32_t seconds = ts % 60;
+            uint32_t minutes = ts / 60 % 60;
+            uint32_t hours = ts / (60 * 60) % 24;
+            uint32_t days = ts / (60 * 60 * 24);
+            info = "Uptime\r\n    Days ";
+            info += days;
+            info += " ";
+            snprintf(buf, sizeof(buf), "%02u", hours);
+            info += buf;
+            info += ":";
+            snprintf(buf, sizeof(buf), "%02u", minutes);
+            info += buf;
+            info += ":";
+            snprintf(buf, sizeof(buf), "%02u", seconds);
+            info += buf;
+            info += "\r\n\r\n";
+            info += "Wifi\r\n    SSID: ";
+            info += WiFi.SSID();
+            info += "\r\n    RSSI: ";
+            info += WiFi.RSSI();
+            info += " dBm\r\n    channel: ";
+            info += WiFi.channel();
+            info += "\r\n";
+            request->send(200, "text/plain", info);
+        }
+    });
 }
 
 static void SetupHtml(void) {
