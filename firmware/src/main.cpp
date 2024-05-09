@@ -275,6 +275,12 @@ static void Set_key(String aeskey) {
 }
 
 static void ConnectToMqtt(void) {
+
+    if (mqttClient.connected()) {
+        reconnectMqtt = false;
+        return;
+    }
+
     Serial.println("Connecting to MQTT...");
     if (!mqttClient.connect()) {
         reconnectMqtt = true;
@@ -617,6 +623,7 @@ void loop() {
         Serial.print("IP address: ");
         Serial.println(WiFi.localIP());
         printip = false;
+        reconnectMqtt = true;
     }
 
     if (ap && (millis() > (5 * 60 * 1000))) {
