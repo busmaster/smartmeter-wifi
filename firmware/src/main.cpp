@@ -45,6 +45,8 @@ static String smartmeter_html;
 static String mqttbroker;
 static int    mqttport;
 static String mqtttopic;
+static String mqttuser;
+static String mqttpassword;
 static String mqtt_html;
 static String ssid;
 static String pass;
@@ -57,6 +59,8 @@ static const char* aeskeyPath = "/aeskey.txt";
 static const char* mqttbrokerPath = "/mqttbroker.txt";
 static const char* mqttportPath = "/mqttport.txt";
 static const char* mqtttopicPath = "/mqtttopic.txt";
+static const char* mqttuserPath = "/mqttuser.txt";
+static const char* mqttpasswordPath = "/mqttpassword.txt";
 
 static espMqttClient mqttClient;
 static bool reconnectMqtt;
@@ -433,6 +437,16 @@ static void RouteWebpages(void) {
                         Serial.printf("mqtt topic set to: %s\r\n", str.c_str());
                         // Write file to save value
                         writeFile(SPIFFS, mqtttopicPath, str.c_str());
+                    } else if (p->name() == "mqtt-user") {
+                        String str = p->value();
+                        Serial.printf("mqtt user set to: %s\r\n", str.c_str());
+                        // Write file to save value
+                        writeFile(SPIFFS, mqttuserPath, str.c_str());
+                    } else if (p->name() == "mqtt-password") {
+                        String str = p->value();
+                        Serial.printf("mqtt password set to: %s\r\n", str.c_str());
+                        // Write file to save value
+                        writeFile(SPIFFS, mqttpasswordPath, str.c_str());
                     }
                 }
             }
@@ -543,6 +557,20 @@ static void SetupHtml(void) {
         str.concat("\"");
         mqtt_html.replace("value=\"topic\"", str);
     }
+    if (!mqttuser.isEmpty()) {
+        String str("value=\"");
+        str.concat(mqttuser);
+        printf("replace empty user\r\n");
+        str.concat("\"");
+        mqtt_html.replace("value=\"user\"", str);
+    }
+    if (!mqttpassword.isEmpty()) {
+        String str("value=\"");
+        str.concat(mqttpassword);
+        printf("replace empty password\r\n");
+        str.concat("\"");
+        mqtt_html.replace("value=\"password\"", str);
+    }
 }
 
 void setup() {
@@ -566,6 +594,8 @@ void setup() {
         mqttport = strtol(port.c_str(), 0, 10);
     }
     mqtttopic = readFile(SPIFFS, mqtttopicPath);
+    mqttuser = readFile(SPIFFS, mqttuserPath);
+    mqttpassword = readFile(SPIFFS, mqttpasswordPath);
 
     Serial.printf("\r\nConfiguration:\r\n");
     Serial.printf("ssid: %s\r\n", ssid.c_str());
@@ -585,6 +615,7 @@ void setup() {
     server.serveStatic("/", SPIFFS, "/");
 
     if (!mqttbroker.isEmpty() && mqttport && !mqtttopic.isEmpty()) {
+        mqttClient.setCredentials(mqttuser.c_str(), mqttpassword.c_str());
         mqttClient.onConnect(OnMqttConnect);
         mqttClient.onDisconnect(OnMqttDisconnect);
         mqttClient.setServer(mqttbroker.c_str(), mqttport);
