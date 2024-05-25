@@ -584,7 +584,7 @@ void setup() {
 
     server.serveStatic("/", SPIFFS, "/");
 
-    if (mqttbroker && mqttport && mqtttopic) {
+    if (!mqttbroker.isEmpty() && mqttport && !mqtttopic.isEmpty()) {
         mqttClient.onConnect(OnMqttConnect);
         mqttClient.onDisconnect(OnMqttDisconnect);
         mqttClient.setServer(mqttbroker.c_str(), mqttport);
@@ -623,7 +623,9 @@ void loop() {
         Serial.print("IP address: ");
         Serial.println(WiFi.localIP());
         printip = false;
-        reconnectMqtt = true;
+        if (!mqttbroker.isEmpty() && mqttport && !mqtttopic.isEmpty()) {
+            reconnectMqtt = true;
+        }
     }
 
     if (ap && (millis() > (5 * 60 * 1000))) {
