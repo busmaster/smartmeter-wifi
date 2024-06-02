@@ -612,7 +612,10 @@ void setup() {
     SetupHtml();
     RouteWebpages();
 
-    server.serveStatic("/", SPIFFS, "/");
+    // Allow access to specific files in SPIFFS
+    // Do not expose the entire SPIFFS that contains our secrets
+    server.serveStatic("style.css", SPIFFS, "/style.css");
+    server.serveStatic("favicon.png", SPIFFS, "/favicon.png");
 
     if (!mqttbroker.isEmpty() && mqttport && !mqtttopic.isEmpty()) {
         mqttClient.setCredentials(mqttuser.c_str(), mqttpassword.c_str());
